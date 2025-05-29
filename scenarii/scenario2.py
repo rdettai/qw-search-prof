@@ -62,7 +62,7 @@ class LogResults:
 
     def on_new_log_line(self, line: str):
         line = line.strip()
-        if line.startswith("htrk"):
+        if "jemprof" in line:
             print(line)
         elif "heap profiling stopped" in line:
             print(line)

@@ -11,16 +11,7 @@ import time
 import concurrent.futures
 from typing import Literal
 
-# from scenarii.scenario1 import (
-#     commit_timeout,
-#     create_indexes,
-#     ingest_documents,
-#     LogResults,
-#     search,
-#     display_statistics,
-# )
-
-from scenarii.scenario2 import (
+from scenarii.scenario1 import (
     commit_timeout,
     create_indexes,
     ingest_documents,
@@ -29,16 +20,49 @@ from scenarii.scenario2 import (
     display_statistics,
 )
 
-os.environ["NO_COLOR"] = "true"
+
+# from scenarii.scenario2 import (
+#     commit_timeout,
+#     create_indexes,
+#     ingest_documents,
+#     LogResults,
+#     search,
+#     display_statistics,
+# )
 
 
-def start_quickwit(binary_path: str):
+DOCKER_IMAGE = "quickwit-oss/quickwit:hprof"
+
+
+def start_quickwit(binary_path: str | None):
+    proc_env = os.environ.copy()
+    if not binary_path is None:
+        args = [binary_path, "run", "--config", "quickwit.yaml"]
+        proc_env["NO_COLOR"] = "true"
+    else:
+        args = [
+            "docker",
+            "run",
+            "-p",
+            "7280:7280",
+            "-v",
+            "./quickwit.yaml:/quickwit.yaml",
+            "-e",
+            "NO_COLOR=true",
+            DOCKER_IMAGE,
+            "run",
+            "--config",
+            "/quickwit.yaml",
+        ]
+
+    print(f"{args}")
     process = subprocess.Popen(
-        [binary_path, "run", "--config", "quickwit.yaml"],
+        args,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         cwd=".",
+        env=proc_env,
     )
     return process
 
@@ -93,7 +117,7 @@ def stop_mem_profiling(url):
 
 
 def main(
-    binary_path: str,
+    binary_path: str | None,
     url: str,
     prof_flag: Literal["nobuild", "none", "search", "indexing", "all"],
 ):
@@ -121,7 +145,7 @@ def main(
 
         if prof_flag in ["indexing", "all"]:
             start_mem_profiling(
-                url, min_alloc_size=64 * 1024, backtrace_every=1024 * 1024 * 1024
+                url, min_alloc_size=64 * 1024, backtrace_every=10 * 1024 * 1024
             )
         ingest_documents(url, log_results)
         print("Waiting for commit...")
@@ -164,16 +188,34 @@ def cleanup_datadir():
     os.mkdir(datadir)
 
 
-def build_quickwit(quickwit_src_dir: str, enable_prof_build: bool):
+def build_quickwit(quickwit_dir: str, enable_prof_build: bool):
     args = ["cargo", "build", "--release"]
     if enable_prof_build:
         args.append("--features")
-        args.append("release-heap-profiled")
+        args.append("release-jemalloc-profiled")
     print(f"{args}")
 
     res = subprocess.run(
         args,
-        cwd=quickwit_src_dir,
+        cwd=f"{quickwit_dir}/quickwit",
+    )
+    if res.returncode != 0:
+        print("Failed to build Quickwit")
+        sys.exit(1)
+
+
+def build_quickwit_docker(quickwit_dir: str, enable_prof_build: bool):
+    args = ["docker", "build", ".", "-t", DOCKER_IMAGE]
+    if enable_prof_build:
+        args.append("--build-arg")
+        args.append("CARGO_FEATURES=release-jemalloc-profiled")
+        args.append("--build-arg")
+        args.append("RUSTFLAGS=--cfg tokio_unstable --cfg tokio_taskdump")
+    print(f"{args}")
+
+    res = subprocess.run(
+        args,
+        cwd=quickwit_dir,
     )
     if res.returncode != 0:
         print("Failed to build Quickwit")
@@ -183,16 +225,33 @@ def build_quickwit(quickwit_src_dir: str, enable_prof_build: bool):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Quickwit search tests.")
     parser.add_argument(
-        "--prof", help="One of [nobuild, none, search, indexing, all]", default="search"
+        "--build",
+        help="The way docker should be built",
+        default="native",
+        choices=["docker", "native"],
+    )
+    parser.add_argument(
+        "--prof",
+        help="The section that should be profiled (nobuild disables the feature flag at compile time)",
+        default="search",
+        choices=["nobuild", "none", "search", "indexing", "all"],
     )
     args = parser.parse_args()
 
     cleanup_datadir()
     os.makedirs("./logs", exist_ok=True)
 
-    quickwit_src_dir = "/Users/remi.dettai/workspace/quickwit/quickwit"
-    build_quickwit(quickwit_src_dir, args.prof != "nobuild")
-    binary_path = f"{quickwit_src_dir}/target/release/quickwit"
+    quickwit_dir = "/Users/remi.dettai/workspace/quickwit"
+    if args.build == "docker":
+        build_quickwit_docker(quickwit_dir, args.prof != "nobuild")
+        binary_path = None
+    elif args.build == "native":
+        build_quickwit(quickwit_dir, args.prof != "nobuild")
+        binary_path = f"{quickwit_dir}/quickwit/target/release/quickwit"
+    else:
+        print("--build must be one of [docker, native]")
+        sys.exit(1)
+
     url = "http://localhost:7280"
 
     main(binary_path, url, args.prof)
